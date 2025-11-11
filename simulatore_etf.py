@@ -10,44 +10,58 @@ from reportlab.lib.styles import getSampleStyleSheet
 # CONFIGURAZIONE BASE
 # ================================
 st.set_page_config(
-    page_title="Simulatore ETF — fino a 40 anni",
+    page_title="Simulatore ETF Realistico",
     page_icon="📈",
     layout="wide",
 )
 
-st.title("📊 Simulatore Portafoglio ETF — Orizzonte fino a 40 anni")
+st.title("📈 Simulatore ETF — Dati realistici di mercato")
 st.markdown(
-    "Cambia le allocazioni, seleziona l'anno di simulazione e osserva come evolve il portafoglio nel tempo."
+    "Simula la crescita di un portafoglio di ETF reali (rendimenti e volatilità stimati). "
+    "Puoi modificare **solo le allocazioni**, mantenendo dati coerenti con il mercato."
 )
 
 # ================================
-# PARAMETRI DI BASE
+# PARAMETRI BASE
 # ================================
 capitale_iniziale = 1000
 versamento_6_10 = 50
 versamento_11_20 = 100
 versamento_21_40 = 150
-
 anni = np.arange(1, 41)
 
 st.sidebar.header("💰 Parametri di investimento")
 
-# slider allocazioni
-alloc_sp500 = st.sidebar.slider("S&P 500 Hedged (%)", 0, 100, 30)
-alloc_sp500usd = st.sidebar.slider("S&P 500 USD (%)", 0, 100, 20)
-alloc_europe = st.sidebar.slider("Europa / Globale (%)", 0, 100, 35)
-alloc_ai = st.sidebar.slider("IA / Tech (%)", 0, 100, 15)
-
-alloc_sum = alloc_sp500 + alloc_sp500usd + alloc_europe + alloc_ai
-alloc_norm = np.array([alloc_sp500, alloc_sp500usd, alloc_europe, alloc_ai]) / alloc_sum
-
-# selettore anno finale
+# selettore anno
 anno_finale = st.sidebar.slider("Anno di simulazione (1–40)", 1, 40, 20)
 
-# ETF
-etf_names = ["S&P 500 Hedged", "S&P 500 USD", "Europa / Globale", "IA / Tech"]
-etf_returns = np.array([0.065, 0.07, 0.055, 0.085])
-etf_vol = np.array([0.13, 0.14, 0.11, 0.18])
+# ================================
+# ETF REALISTICI
+# ================================
+etf_data = {
+    "Vanguard FTSE All-World (VWCE)": {"return": 0.063, "vol": 0.135},
+    "S&P 500 USD": {"return": 0.070, "vol": 0.140},
+    "Europa / Globale": {"return": 0.055, "vol": 0.110},
+    "IA / Tech": {"return": 0.085, "vol": 0.180},
+    "Mercati Emergenti": {"return": 0.075, "vol": 0.160},
+}
+
+etf_names = list(etf_data.keys())
+
+st.sidebar.markdown("### 📊 Allocazioni ETF")
+active_etfs = {}
+for name in etf_names:
+    active = st.sidebar.checkbox(f"Includi {name}", True)
+    alloc = st.sidebar.slider(f"Allocazione {name} (%)", 0, 100, 20 if active else 0)
+    active_etfs[name] = {"alloc": alloc, "active": active}
+
+# normalizza solo gli ETF attivi
+alloc_tot = sum(v["alloc"] for v in active_etfs.values() if v["active"])
+if alloc_tot == 0:
+    st.error("⚠️ Imposta almeno un'allocazione maggiore di 0%.")
+    st.stop()
+
+alloc_norm = {n: v["alloc"] / alloc_tot for n, v in active_etfs.items() if v["active"]}
 
 # ================================
 # SIMULAZIONE
@@ -55,15 +69,14 @@ etf_vol = np.array([0.13, 0.14, 0.11, 0.18])
 valori = [capitale_iniziale]
 for anno in anni:
     last = valori[-1]
-    # versamenti annuali
-    if anno > 5 and anno <= 10:
+    if 6 <= anno <= 10:
         last += versamento_6_10 * 12
-    elif anno > 10 and anno <= 20:
+    elif 11 <= anno <= 20:
         last += versamento_11_20 * 12
-    elif anno > 20:
+    elif anno >= 21:
         last += versamento_21_40 * 12
-    # crescita
-    crescita = np.sum(etf_returns * alloc_norm)
+
+    crescita = sum(etf_data[n]["return"] * w for n, w in alloc_norm.items())
     last *= (1 + crescita)
     valori.append(last)
 
@@ -102,9 +115,10 @@ st.image(img_buf_main, caption="📊 Andamento del portafoglio simulato", use_co
 # PIE CHART allocazione
 # ================================
 fig_pie, ax_pie = plt.subplots(figsize=(4, 4))
-colors_pie = ["#00FF85", "#4B8BFF", "#FFB84C", "#B066FF"]
-ax_pie.pie(alloc_norm, labels=[f"{n} ({a*100:.1f}%)" for n, a in zip(etf_names, alloc_norm)],
-           colors=colors_pie, autopct="%1.1f%%", startangle=90, textprops={'color':"w"})
+colors = plt.cm.Paired(np.linspace(0, 1, len(alloc_norm)))
+ax_pie.pie(alloc_norm.values(),
+           labels=[f"{n} ({w*100:.1f}%)" for n, w in alloc_norm.items()],
+           colors=colors, autopct="%1.1f%%", startangle=90, textprops={'color':"w"})
 ax_pie.set_title("Allocazione ETF", color="w")
 fig_pie.patch.set_facecolor("#0E1117")
 ax_pie.set_facecolor("#0E1117")
@@ -126,6 +140,12 @@ st.write(f"**Totale finale:** {totale_finale:,.0f} €")
 st.write(f"**Rendimento complessivo:** {rendimento_tot:.2f}%")
 st.write(f"**CAGR medio annuo:** {cagr:.2f}%")
 
+st.markdown("#### ETF inclusi:")
+for n, w in alloc_norm.items():
+    r = etf_data[n]["return"] * 100
+    v = etf_data[n]["vol"] * 100
+    st.write(f"• {n} — rendimento medio: {r:.2f}%, volatilità: {v:.1f}%, peso: {w*100:.1f}%")
+
 # ================================
 # PDF EXPORT
 # ================================
@@ -135,25 +155,21 @@ def genera_pdf():
     styles = getSampleStyleSheet()
     story = []
 
-    story.append(Paragraph("<b>📊 Report Portafoglio ETF</b>", styles["Title"]))
+    story.append(Paragraph("<b>📊 Report Portafoglio ETF - Realistico</b>", styles["Title"]))
     story.append(Spacer(1, 12))
     story.append(Paragraph(f"Orizzonte simulato: {anno_finale} anni", styles["Normal"]))
     story.append(Paragraph(f"Totale finale: {totale_finale:,.0f} €", styles["Normal"]))
     story.append(Paragraph(f"CAGR medio: {cagr:.2f}%", styles["Normal"]))
     story.append(Spacer(1, 12))
-
     story.append(Image(img_buf_main, width=450, height=250))
     story.append(Spacer(1, 12))
     story.append(Image(pie_buf, width=300, height=300))
     story.append(Spacer(1, 12))
 
-    for i, name in enumerate(etf_names):
-        story.append(Paragraph(
-            f"{name}: rendimento {etf_returns[i]*100:.2f}%, "
-            f"volatilità {etf_vol[i]*100:.1f}%, "
-            f"allocazione {alloc_norm[i]*100:.1f}%",
-            styles["Normal"]
-        ))
+    for n, w in alloc_norm.items():
+        r = etf_data[n]["return"] * 100
+        v = etf_data[n]["vol"] * 100
+        story.append(Paragraph(f"{n}: rendimento {r:.2f}%, volatilità {v:.1f}%, allocazione {w*100:.1f}%", styles["Normal"]))
 
     doc.build(story)
     buffer_pdf.seek(0)
@@ -162,6 +178,6 @@ def genera_pdf():
 st.download_button(
     label="📄 Esporta Report PDF",
     data=genera_pdf(),
-    file_name="report_portafoglio_etf_40anni.pdf",
+    file_name="report_portafoglio_reale.pdf",
     mime="application/pdf"
 )
