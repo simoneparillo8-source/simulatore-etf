@@ -7,11 +7,10 @@ from reportlab.lib import colors
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image, Table, TableStyle
 
-# === CONFIGURAZIONE APP ===
-st.set_page_config(page_title="Simulatore ETF — Report Avanzato", layout="wide")
+# === CONFIGURAZIONE BASE ===
+st.set_page_config(page_title="Simulatore ETF — PDF Export", layout="wide")
 plt.style.use("dark_background")
 
-# === PARAMETRI DI BASE ===
 years = np.arange(1, 21)
 initial_capital = 1000
 monthly_contrib = [0]*5 + [50]*5 + [100]*10
@@ -27,12 +26,12 @@ returns_classico = [0.061, 0.052, 0.045, 0.065]
 vol_classico = [0.14, 0.10, 0.11, 0.18]
 
 # === UI ===
-st.title("📊 Simulatore ETF — Report Avanzato (Classico vs Globale)")
-st.markdown("Analisi a 20 anni con **banda di volatilità**, **rendimento medio**, **drawdown stimato** e **commento automatico** del portafoglio.")
+st.title("📊 Simulatore ETF — PDF Report (Classico vs Globale)")
+st.markdown("Analisi a 20 anni con banda di volatilità, rendimento medio e drawdown stimato.")
 
 scenario = st.sidebar.selectbox("Scegli scenario di rendimento", ["Pessimistico", "Medio", "Ottimistico"])
 
-# === SLIDER PER ALLOCAZIONI ===
+# === ALLOCAZIONI ===
 st.sidebar.header("💼 Allocazioni ETF (Globale)")
 default_alloc = [0.4, 0.25, 0.2, 0.15]
 alloc = []
@@ -64,7 +63,7 @@ values_c, upper_c, lower_c, sigma_c = simulate(returns_classico_adj, vol_classic
 values_g, upper_g, lower_g, sigma_g = simulate(returns_globale_adj, vol_globale)
 
 # === GRAFICO ===
-fig, ax = plt.subplots(figsize=(10,6))
+fig, ax = plt.subplots(figsize=(10, 6))
 ax.plot(years, values_c, label="Classico (S&P500 Hedged)", color="#4B8BFF", linewidth=2)
 ax.fill_between(years, lower_c, upper_c, color="#4B8BFF", alpha=0.15)
 ax.plot(years, values_g, label="Globale (VWCE)", color="#00FF85", linewidth=2.5)
@@ -75,13 +74,13 @@ ax.set_ylabel("Valore (€)")
 ax.legend()
 ax.grid(True, alpha=0.3)
 
-# Salva grafico in buffer
+# Salva grafico in buffer per PDF
 img_buf = BytesIO()
 fig.savefig(img_buf, format='png', dpi=200, bbox_inches='tight')
 img_buf.seek(0)
 st.pyplot(fig)
 
-# === METRICHE FINALI ===
+# === METRICHE ===
 total_invested = initial_capital + annual_contrib.sum()
 final_c = values_c[-1]
 final_g = values_g[-1]
@@ -90,36 +89,30 @@ cagr_g = (final_g / total_invested)**(1/20) - 1
 drawdown_c = sigma_c * 2.2 * 100
 drawdown_g = sigma_g * 2.2 * 100
 
-# === COMMENTO AUTOMATICO ===
-if cagr_g > cagr_c:
-    perf_comment = f"Il portafoglio **Globale (VWCE)** mostra una crescita media superiore di **{(cagr_g-cagr_c)*100:.2f}%** annuo rispetto al Classico, grazie alla maggiore diversificazione geografica e valutaria."
-else:
-    perf_comment = f"Il portafoglio **Classico (S&P500 Hedged)** risulta leggermente più efficiente in questo scenario, con un rendimento medio superiore di **{(cagr_c-cagr_g)*100:.2f}%** annuo."
-    
-if drawdown_g < drawdown_c:
-    risk_comment = f"In termini di rischio, il Globale presenta un drawdown stimato inferiore (**{drawdown_g:.1f}% vs {drawdown_c:.1f}%**), segno di minore volatilità media."
-else:
-    risk_comment = f"Il Classico appare più stabile con drawdown inferiore (**{drawdown_c:.1f}% vs {drawdown_g:.1f}%**), ma la differenza è contenuta."
-
-time_comment = "L’orizzonte di 20 anni permette di sfruttare pienamente l’interesse composto, rendendo le oscillazioni intermedie meno rilevanti per un investitore giovane."
-
-final_comment = f"{perf_comment} {risk_comment} {time_comment}"
+st.subheader("📘 Confronto finale dopo 20 anni")
+col1, col2, col3, col4 = st.columns(4)
+col1.metric("Valore finale Classico", f"€ {final_c:,.2f}")
+col2.metric("Valore finale Globale", f"€ {final_g:,.2f}")
+col3.metric("CAGR Classico", f"{cagr_c*100:.2f}%")
+col4.metric("CAGR Globale", f"{cagr_g*100:.2f}%")
 
 # === FUNZIONE PER PDF ===
 def genera_pdf():
     buf = BytesIO()
-    doc = SimpleDocTemplate(buf, pagesize=landscape(A4), title="Simulatore ETF Report Avanzato")
+    doc = SimpleDocTemplate(buf, pagesize=landscape(A4), title="Simulatore ETF Report")
     styles = getSampleStyleSheet()
     story = []
 
-    story.append(Paragraph("<b>📊 Simulatore ETF — Report Avanzato (20 anni)</b>", styles['Title']))
+    story.append(Paragraph("<b>📊 Simulatore ETF — Report 20 anni</b>", styles['Title']))
     story.append(Spacer(1, 10))
     story.append(Paragraph(f"<b>Scenario:</b> {scenario}", styles['Normal']))
     story.append(Spacer(1, 12))
 
+    # Inserisci il grafico
     story.append(Image(img_buf, width=700, height=400))
     story.append(Spacer(1, 15))
 
+    # Tabella riassuntiva
     data = [
         ["Parametro", "Classico (S&P500 Hedged)", "Globale (VWCE)"],
         ["Valore finale (€)", f"{final_c:,.2f}", f"{final_g:,.2f}"],
@@ -140,11 +133,8 @@ def genera_pdf():
     story.append(table)
     story.append(Spacer(1, 20))
 
-    story.append(Paragraph("<b>💬 Analisi automatica</b>", styles['Heading2']))
-    story.append(Paragraph(final_comment, styles['Normal']))
-    story.append(Spacer(1, 20))
-
-    story.append(Paragraph("<b>💼 Dettaglio ETF (Portafoglio Globale)</b>", styles['Heading2']))
+    # Dettaglio ETF
+    story.append(Paragraph("<b>💼 Dettaglio ETF (Globale)</b>", styles['Heading2']))
     for i, name in enumerate(etf_globale):
         story.append(Paragraph(f"{name}: rendimento {returns_globale_adj[i]*100:.2f}%, volatilità {vol_globale[i]*100:.1f}%, allocazione {alloc[i]*100:.1f}%", styles['Normal']))
 
@@ -152,22 +142,12 @@ def genera_pdf():
     buf.seek(0)
     return buf
 
-# === INTERFACCIA STREAMLIT ===
-st.subheader("📘 Confronto finale dopo 20 anni")
-col1, col2, col3, col4 = st.columns(4)
-col1.metric("Valore finale Classico", f"€ {final_c:,.2f}")
-col2.metric("Valore finale Globale", f"€ {final_g:,.2f}")
-col3.metric("CAGR Classico", f"{cagr_c*100:.2f}%")
-col4.metric("CAGR Globale", f"{cagr_g*100:.2f}%")
-
-st.markdown(f"**Analisi sintetica:** {final_comment}")
-
-# === PULSANTE PDF ===
+# === PULSANTE PER ESPORTARE PDF ===
 if st.button("📄 Esporta PDF Report"):
     pdf_buf = genera_pdf()
     st.download_button(
         label="💾 Scarica Report PDF",
         data=pdf_buf,
-        file_name="report_portafoglio_etf_avanzato.pdf",
+        file_name="report_portafoglio_etf.pdf",
         mime="application/pdf"
     )
