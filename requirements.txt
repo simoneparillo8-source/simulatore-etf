@@ -5,3 +5,4 @@ pandas
 reportlab
 yfinance
 plotly
+experimental_rerun
