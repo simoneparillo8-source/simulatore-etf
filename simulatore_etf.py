@@ -388,4 +388,3 @@ with col_b:
             st.error("CSV non compatibile. Deve contenere 'Anno' e 'Valore nominale (€)'")
 
 st.caption("Script locale: per performance migliori, evita richieste yfinance ripetute e usa cache. Per acquisti mensili molti calcoli avverranno localmente e possono richiedere CPU in caso di orizzonti molto lunghi.")
-
