@@ -138,31 +138,65 @@ ters = np.array([st.session_state.etfs[t]["ter"] for t in tickers])
 # --------------------
 # Simulation (optimized)
 # --------------------
-def simulate_monthly(initial, monthly, years, weights, cagrs, ters, fineco_fee, fx_spread, tickers):
-    months = years * 12
+def simulate_monthly_fixed(initial, monthly, years, weights, cagrs, ters, fineco_fee, fx_spread, tickers):
+    months = int(years * 12)
     nav = np.zeros(months)
     invested = np.zeros(months)
+
     nav_val = float(initial)
     invested_cum = float(initial)
-    monthly_rates = (1 + cagrs) ** (1 / 12) - 1
-    monthly_ter = (1 - ters) ** (1 / 12) - 1
-    # precompute USD flags from ticker name once
+
+    # monthly return per ETF (decimale)
+    monthly_rates = (1.0 + cagrs) ** (1.0 / 12.0) - 1.0
+    # monthly TER as equivalent multiplicative factor (es. 1 - ter_annuo)^(1/12)
+    monthly_ter_factor = (1.0 - ters) ** (1.0 / 12.0)
+
+    # USD flag
     usd_flags = np.array([("USD" in t.upper()) or (".US" in t.upper()) or ("USD" in st.session_state.etfs[t]["name"].upper()) for t in tickers])
+
     for m in range(months):
-        # commission per ETF tranche
+        # ---- determine commissions aggregated for this monthly order (one order across ETFs)
         total_comm = 0.0
-        for j in range(len(tickers)):
-            tranche = monthly * weights[j]
-            total_comm += commission(tranche, bool(usd_flags[j]), fineco_fee, fx_spread)
-        net_buy = max(0.0, monthly - total_comm)
-        nav_val += net_buy
-        invested_cum += monthly
+        # if you want to charge commission once per order, compute on total amount
+        total_tranche = monthly
+        # If you instead want commission per ETF, uncomment the per-ETF block below
+        # for j in range(len(tickers)):
+        #     tranche = monthly * weights[j]
+        #     total_comm += commission(tranche, bool(usd_flags[j]), fineco_fee, fx_spread)
+
+        # Commission on whole order (more realistic): charged once, consider USD spreads per ETF proportionally
+        # approximate FX cost for USD portion:
+        usd_share = float(np.dot(weights, usd_flags.astype(float)))
+        fx_cost = total_tranche * usd_share * fx_spread
+        # apply one brokerage fee per order if order < 2500
+        order_fee = fineco_fee if total_tranche < 2500.0 else 0.0
+        total_comm = order_fee + fx_cost
+
+        # Net amount actually invested this month
+        net_buy = max(0.0, total_tranche - total_comm)
+
+        # ---- apply returns to existing NAV first (assume contribution at end of period)
         weighted_ret = float(np.dot(weights, monthly_rates))
-        weighted_ter = float(np.dot(weights, monthly_ter))
-        nav_val = nav_val * (1.0 + weighted_ret + weighted_ter)
+        nav_val = nav_val * (1.0 + weighted_ret)
+
+        # ---- apply TER as multiplicative reduction to all holdings
+        # convert weights into a single monthly TER factor: product_i ( (1-ter_i)^(1/12) )^weight_i approximate via exp(sum(weight_i*ln(factor_i)))
+        # simpler: weighted monthly factor (approx)
+        weighted_monthly_ter_factor = np.prod(monthly_ter_factor ** weights)
+        nav_val = nav_val * weighted_monthly_ter_factor
+
+        # ---- add the month's net contribution AFTER returns (end-of-period convention)
+        nav_val += net_buy
+
+        # ---- invested accounting: track what you actually paid (gross or net as desired)
+        invested_cum += total_tranche  # gross paid
+        # or if you want invested to be the actual money that entered the market (net of commission), do:
+        # invested_cum += net_buy
+
         nav[m] = nav_val
         invested[m] = invested_cum
-    # compress to yearly
+
+    # compress to yearly result (end of each year)
     nav_year = np.array([nav[(y+1)*12 - 1] for y in range(years)])
     invested_year = np.array([invested[(y+1)*12 - 1] for y in range(years)])
     return nav_year, invested_year
