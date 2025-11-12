@@ -1,217 +1,289 @@
+# simulatore_etf_avanzato.py
 import streamlit as st
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
 from io import BytesIO
-from reportlab.lib.pagesizes import landscape, A4
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image
-from reportlab.lib.styles import getSampleStyleSheet
 
-# ================================
-# CONFIGURAZIONE BASE
-# ================================
-st.set_page_config(
-    page_title="Simulatore ETF Avanzato",
-    page_icon="💹",
-    layout="wide",
-)
+# -----------------------
+# Config Streamlit
+# -----------------------
+st.set_page_config(page_title="Simulatore ETF Avanzato", layout="wide", page_icon="💹")
+st.title("💹 Simulatore ETF Avanzato — tasse, inflazione, cambio e target")
+st.markdown("Versione con simulazione deterministica + Monte Carlo (opzionale).")
 
-st.title("💹 Simulatore ETF — Realistico, Moderno e Interattivo")
-st.markdown("""
-Benvenuto nel tuo simulatore finanziario personale!  
-💼 Qui puoi testare scenari **pessimistici, neutri e ottimistici** con dati di mercato realistici.  
-Guarda **quanto investi nel tempo**, quanto cresce il capitale e scarica un **report PDF** elegante.
-""")
+# -----------------------
+# Sidebar - Input utente
+# -----------------------
+st.sidebar.header("Parametri generali")
+horizon = st.sidebar.slider("Orizzonte (anni)", 1, 40, 20)
+scenario = st.sidebar.radio("Scenario di mercato", ["Pessimistico", "Neutro", "Ottimistico"], index=1)
 
-# ================================
-# PARAMETRI BASE
-# ================================
-st.sidebar.title("⚙️ Controlli principali")
+st.sidebar.markdown("### Tasse & Inflazione")
+tax_rate = st.sidebar.number_input("Aliquota capital gain (%)", min_value=0.0, max_value=100.0, value=26.0, step=0.5) / 100.0
+inflation = st.sidebar.number_input("Inflazione annua attesa (%)", min_value=0.0, max_value=20.0, value=2.0, step=0.1) / 100.0
 
-st.sidebar.subheader("💰 Parametri di investimento")
-capitale_iniziale = 1000
-versamento_6_10 = 50
-versamento_11_20 = 100
-versamento_21_40 = 150
-anni = np.arange(1, 41)
+st.sidebar.markdown("### Cambio EUR/USD (per ETF non hedged)")
+fx_initial = st.sidebar.number_input("Prezzo iniziale EUR/USD (1 EUR = ? USD)", value=1.0, step=0.01, format="%.3f")
+fx_drift = st.sidebar.number_input("Drift annuale atteso USD in EUR (%) (es: 0.02 = USD +2% p.a.)", value=0.00, step=0.01)  # expressed in fraction
+fx_vol = st.sidebar.number_input("Volatilità FX annua (%)", value=8.0, step=0.5) / 100.0
 
-anno_finale = st.sidebar.slider("Anno di simulazione", 1, 40, 20)
+st.sidebar.markdown("### Monte Carlo (opzionale)")
+mc_runs = st.sidebar.slider("Numero simulazioni Monte Carlo (0 = disattiva)", 0, 5000, 0, step=50)
+mc_seed = st.sidebar.number_input("Seed (0 per random)", value=0, step=1)
 
-# ================================
-# SCENARI
-# ================================
-st.sidebar.subheader("📈 Scenario di mercato")
-scenario = st.sidebar.radio(
-    "Seleziona uno scenario:",
-    ("Pessimistico", "Neutro", "Ottimistico"),
-    index=1
-)
+st.sidebar.markdown("### Target")
+target_active = st.sidebar.checkbox("Imposta target finanziario", value=True)
+target_value = st.sidebar.number_input("Target (€)", min_value=0.0, value=50000.0, step=100.0)
 
+st.sidebar.markdown("---")
+
+# -----------------------
+# ETF realistici (fixed)
+# -----------------------
+st.sidebar.header("Allocazioni ETF (modifica solo i pesi)")
+etf_data = {
+    "Vanguard FTSE All-World (VWCE) [acc]": {"mu": 0.063, "vol": 0.135, "hedged": False},  # global
+    "S&P 500 (USD) [non-hedged]": {"mu": 0.070, "vol": 0.140, "hedged": False},
+    "Europa / Developed": {"mu": 0.055, "vol": 0.110, "hedged": True},
+    "IA / Tech (tematico)": {"mu": 0.085, "vol": 0.180, "hedged": False},
+}
+
+# default allocations
+defaults = [35, 30, 20, 15]
+etf_names = list(etf_data.keys())
+alloc_inputs = []
+for i, name in enumerate(etf_names):
+    alloc_inputs.append(st.sidebar.slider(name + " (%)", 0, 100, defaults[i], step=1))
+
+alloc_array = np.array(alloc_inputs, dtype=float)
+if alloc_array.sum() == 0:
+    st.sidebar.error("Imposta almeno una percentuale > 0")
+    st.stop()
+alloc_norm = alloc_array / alloc_array.sum()
+
+# -----------------------
+# Adjustments per scenario
+# -----------------------
 mult_rend = {"Pessimistico": 0.7, "Neutro": 1.0, "Ottimistico": 1.25}[scenario]
 mult_vol = {"Pessimistico": 1.25, "Neutro": 1.0, "Ottimistico": 0.85}[scenario]
 
-# ================================
-# ETF REALISTICI
-# ================================
-etf_data = {
-    "Vanguard FTSE All-World (VWCE)": {"return": 0.063, "vol": 0.135},
-    "S&P 500 USD": {"return": 0.070, "vol": 0.140},
-    "Europa / Globale": {"return": 0.055, "vol": 0.110},
-    "IA / Tech": {"return": 0.085, "vol": 0.180},
-    "Mercati Emergenti": {"return": 0.075, "vol": 0.160},
-}
+# build arrays
+mus = np.array([etf_data[n]["mu"] for n in etf_names]) * mult_rend
+vols = np.array([etf_data[n]["vol"] for n in etf_names]) * mult_vol
+hedged_flags = np.array([etf_data[n]["hedged"] for n in etf_names])
 
-st.sidebar.subheader("📊 Allocazione ETF")
-alloc = {}
-for nome in etf_data.keys():
-    active = st.sidebar.checkbox(f"Includi {nome}", True)
-    percent = st.sidebar.slider(f"Allocazione {nome} (%)", 0, 100, 20 if active else 0)
-    if active:
-        alloc[nome] = percent
+# -----------------------
+# Cashflow schedule (monthly contributions converted yearly)
+# Based on your earlier plan: 0 in years 1-5, 50€/month years 6-10, 100€/month years 11-... etc.
+# Allow longer contributions: after year 20 we use 150€/month as earlier versions used.
+# -----------------------
+monthly = np.zeros(horizon, dtype=float)
+for y in range(1, horizon+1):
+    if 1 <= y <= 5:
+        monthly[y-1] = 0.0
+    elif 6 <= y <= 10:
+        monthly[y-1] = 50.0
+    elif 11 <= y <= 20:
+        monthly[y-1] = 100.0
+    else:
+        monthly[y-1] = 150.0
+annual_contrib = monthly * 12.0
+years = np.arange(1, horizon+1)
 
-if sum(alloc.values()) == 0:
-    st.error("⚠️ Devi selezionare almeno un ETF con percentuale > 0.")
-    st.stop()
+# -----------------------
+# Deterministic simulation (expected path)
+# For FX we compound the fx_drift deterministically if MC=0
+# -----------------------
+def deterministic_simulation():
+    nav = np.zeros(horizon)
+    invested_cum = np.zeros(horizon)
+    fx_rate = np.ones(horizon) * fx_initial
+    # deterministic fx path: annual compounding of drift
+    for t in range(horizon):
+        if t == 0:
+            fx_rate[t] = fx_initial * (1.0 + fx_drift)
+        else:
+            fx_rate[t] = fx_rate[t-1] * (1.0 + fx_drift)
+    # start with initial capital invested at t=0 (we'll consider initial capital as already invested)
+    total = 0.0
+    invested = 0.0
+    # we treat initial capital as invested at time 0
+    invested += 0.0  # initial 1000 handled as base NAV?
+    # We'll start NAV as initial capital (user earlier used 1000). Keep consistent and add initial 1000 invested.
+    initial_capital = 1000.0
+    total = initial_capital
+    invested = initial_capital
+    for t in range(horizon):
+        # add annual contribution at the beginning of the year
+        contrib = annual_contrib[t]
+        total += contrib
+        invested += contrib
+        # compute portfolio return for the year:
+        # For hedged ETFs, return in EUR is mu
+        # For non-hedged ETFs, return in EUR approximated as (1+mu)*(1+fx_return)-1
+        # Here fx_return = fx_rate[t]/fx_rate[t-1]-1 for t>0; for t==0 use fx_drift
+        if t == 0:
+            fx_ret = fx_drift
+        else:
+            fx_ret = fx_rate[t] / fx_rate[t-1] - 1.0
+        # portfolio expected return this year
+        yearly_returns = np.zeros_like(mus)
+        for i in range(len(mus)):
+            if hedged_flags[i]:
+                yearly_returns[i] = mus[i]
+            else:
+                # approx combined effect
+                yearly_returns[i] = (1.0 + mus[i]) * (1.0 + fx_ret) - 1.0
+        port_mu = np.dot(alloc_norm, yearly_returns)
+        total = total * (1.0 + port_mu)
+        nav[t] = total
+        invested_cum[t] = invested
+    return nav, invested_cum, fx_rate
 
-# normalizzazione
-alloc_norm = {n: p / sum(alloc.values()) for n, p in alloc.items()}
+nav_det, invested_det, fx_det = deterministic_simulation()
 
-# ================================
-# SIMULAZIONE
-# ================================
-valore_tot = [capitale_iniziale]
-capitale_investito = [capitale_iniziale]
+# after-tax final: tax on gains at the end
+final_nominal = nav_det[-1]
+gain_nominal = final_nominal - invested_det[-1]
+tax_amount = max(0.0, gain_nominal) * tax_rate
+final_after_tax = final_nominal - tax_amount
+# inflation adjustment (real value)
+real_final = final_nominal / ((1.0 + inflation) ** horizon)
+real_after_tax = final_after_tax / ((1.0 + inflation) ** horizon)
 
-for anno in anni:
-    last = valore_tot[-1]
-    investito = capitale_investito[-1]
+# -----------------------
+# Monte Carlo simulation (if requested)
+# Model annual returns per ETF ~ Normal(mu, sigma) (lognormal is alternative; this is a simplification)
+# FX modeled as geometric (log returns normal) with drift fx_drift and vol fx_vol
+# For each run simulate year-by-year, calculate NAV; accumulate final NAVs to compute percentiles & P(target)
+# -----------------------
+mc_results = None
+mc_percentiles = None
+p_target = None
 
-    if 6 <= anno <= 10:
-        investito += versamento_6_10 * 12
-        last += versamento_6_10 * 12
-    elif 11 <= anno <= 20:
-        investito += versamento_11_20 * 12
-        last += versamento_11_20 * 12
-    elif anno >= 21:
-        investito += versamento_21_40 * 12
-        last += versamento_21_40 * 12
+if mc_runs > 0:
+    rng = np.random.RandomState(None if mc_seed == 0 else int(mc_seed))
+    finals = np.zeros(mc_runs)
+    # For storing yearly percentiles optional
+    all_paths = np.zeros((mc_runs, horizon))
+    for r in range(mc_runs):
+        total = 1000.0
+        invested = 1000.0
+        fx = fx_initial
+        for t in range(horizon):
+            # annual contribution at beginning
+            contrib = annual_contrib[t]
+            total += contrib
+            invested += contrib
+            # simulate ETF returns this year
+            # draw normal shocks for each ETF
+            shocks = rng.normal(loc=mus, scale=vols)
+            # simulate fx log-return
+            eps_fx = rng.normal(loc=fx_drift, scale=fx_vol)
+            fx = fx * (1.0 + eps_fx)
+            # combine returns for hedged / non-hedged
+            yearly_returns = np.zeros_like(shocks)
+            for i in range(len(shocks)):
+                if hedged_flags[i]:
+                    yearly_returns[i] = shocks[i]
+                else:
+                    yearly_returns[i] = (1.0 + shocks[i]) * (1.0 + eps_fx) - 1.0
+            port_ret = np.dot(alloc_norm, yearly_returns)
+            total = total * (1.0 + port_ret)
+            all_paths[r, t] = total
+        finals[r] = total
+    mc_results = finals
+    mc_percentiles = np.percentile(all_paths, [10, 25, 50, 75, 90], axis=0)  # shape (5, horizon)
+    if target_active:
+        p_target = np.mean(finals >= target_value)
 
-    crescita = sum(etf_data[n]["return"] * mult_rend * w for n, w in alloc_norm.items())
-    last *= (1 + crescita)
-    valore_tot.append(last)
-    capitale_investito.append(investito)
+# -----------------------
+# Presentazione: grafici & tabella
+# -----------------------
+st.subheader("Risultato deterministico (atteso)")
 
-valore_tot = np.array(valore_tot[1:])
-capitale_investito = np.array(capitale_investito[1:])
-anni_vis = anni[:anno_finale]
+colA, colB, colC, colD = st.columns(4)
+colA.metric("Valore finale (nominale)", f"€ {final_nominal:,.0f}")
+colB.metric("Totale investito", f"€ {invested_det[-1]:,.0f}")
+colC.metric("Profitto (nominale)", f"€ {gain_nominal:,.0f}")
+colD.metric("Valore netto dopo tasse", f"€ {final_after_tax:,.0f}")
 
-# ================================
-# RISULTATI
-# ================================
-valore_finale = valore_tot[anno_finale - 1]
-investito_finale = capitale_investito[anno_finale - 1]
-profitto = valore_finale - investito_finale
-rendimento_tot = (valore_finale / investito_finale - 1) * 100
-cagr = ((valore_finale / investito_finale) ** (1 / anno_finale) - 1) * 100
+colE, colF = st.columns(2)
+colE.metric("Valore finale (reale, netto inflazione)", f"€ {real_final:,.0f}")
+colF.metric("Valore netto dopo tasse (reale)", f"€ {real_after_tax:,.0f}")
 
-st.markdown("## 💡 Riepilogo risultati")
+if target_active:
+    reached = final_after_tax >= target_value
+    st.info(f"Target = € {target_value:,.0f}  →  Deterministic: {'Raggiunto' if reached else 'Non raggiunto'}")
+    if mc_runs > 0:
+        st.success(f"Monte Carlo: probabilità stimata di raggiungere target = {p_target*100:.1f}% ({mc_runs} simulazioni)")
 
-col1, col2, col3 = st.columns(3)
-col1.metric("Totale investito", f"{investito_finale:,.0f} €")
-col2.metric("Valore portafoglio", f"{valore_finale:,.0f} €")
-col3.metric("Profitto", f"{profitto:,.0f} €", f"{rendimento_tot:.2f}%")
+# -----------------------
+# Grafico principale
+# -----------------------
+st.subheader("Grafico: Capitale investito vs Valore del portafoglio")
+fig, ax = plt.subplots(figsize=(10,6))
 
-st.markdown(f"📆 Periodo simulato: **{anno_finale} anni** — Scenario: **{scenario}**")
-st.divider()
+ax.plot(years, invested_det, linestyle='--', label="Capitale investito cumulato", color="#2EC4B6", linewidth=2)
+ax.plot(years, nav_det, label="Valore portafoglio (deterministico)", color="#FF9F1C", linewidth=3)
 
-# ================================
-# GRAFICO MODERNO
-# ================================
-st.markdown("## 📊 Evoluzione nel tempo")
+if mc_runs > 0:
+    # shade percentiles area (10-90)
+    p10 = mc_percentiles[0]
+    p90 = mc_percentiles[-1]
+    ax.fill_between(years, p10, p90, color="#8884ff", alpha=0.18, label="MC 10-90 percentile")
+    # median
+    ax.plot(years, mc_percentiles[2], color="#7a4cff", linestyle=':', label="MC mediana")
 
-fig, ax = plt.subplots(figsize=(10, 5))
-ax.plot(anni_vis, capitale_investito[:anno_finale], label="💶 Capitale Investito", color="#2EC4B6", linewidth=3, linestyle="--")
-ax.plot(anni_vis, valore_tot[:anno_finale], label="📈 Valore Portafoglio", color="#FF9F1C", linewidth=4)
-ax.fill_between(anni_vis, capitale_investito[:anno_finale], valore_tot[:anno_finale],
-                where=valore_tot[:anno_finale] >= capitale_investito[:anno_finale],
-                color="#2EC4B6", alpha=0.2)
-ax.fill_between(anni_vis, capitale_investito[:anno_finale], valore_tot[:anno_finale],
-                where=valore_tot[:anno_finale] < capitale_investito[:anno_finale],
-                color="#E71D36", alpha=0.2)
+ax.set_title("Capitale investito vs Valore del portafoglio")
+ax.set_xlabel("Anno")
+ax.set_ylabel("Valore (€)")
+ax.legend()
+ax.grid(alpha=0.25)
+fig.patch.set_facecolor("white")
+ax.set_facecolor("white")
 
-ax.set_title(f"📊 Crescita del capitale nel tempo ({scenario})", fontsize=16, color="#F4F4F9")
-ax.set_xlabel("Anno", color="#F4F4F9")
-ax.set_ylabel("Valore (€)", color="#F4F4F9")
-ax.legend(facecolor="#111", edgecolor="#333", labelcolor="w")
-ax.grid(alpha=0.3)
-fig.patch.set_facecolor("#0E1117")
-ax.set_facecolor("#0E1117")
-ax.tick_params(colors="#F4F4F9")
+st.pyplot(fig)
+plt.close(fig)
 
-img_buf_main = BytesIO()
-fig.savefig(img_buf_main, format='png', bbox_inches='tight', dpi=200)
-img_buf_main.seek(0)
-plt.close('all')
+# -----------------------
+# Tabella anno per anno (deterministica)
+# -----------------------
+st.subheader("Tabella anno per anno (deterministica)")
+df = pd.DataFrame({
+    "Anno": years,
+    "Investito cumulato (€)": invested_det,
+    "Valore nominale (€)": nav_det,
+})
+df["Profitto (€)"] = df["Valore nominale (€)"] - df["Investito cumulato (€)"]
+df["Valore netto dopo tasse (€)"] = df["Valore nominale (€)"] - (np.maximum(0, df["Profitto (€)"]) * tax_rate)
+df["Valore reale (€)"] = df["Valore nominale (€)"] / ((1.0 + inflation) ** df["Anno"].values)
+st.dataframe(df.style.format("{:,.0f}"), height=360)
 
-st.image(img_buf_main, caption="📈 Confronto tra capitale investito e valore totale", use_container_width=True)
+# CSV download
+csv = df.to_csv(index=False).encode('utf-8')
+st.download_button("⬇️ Scarica tabella annuale (CSV)", data=csv, file_name="simulazione_anno_per_anno.csv", mime="text/csv")
 
-# ================================
-# ALLOCAZIONE ETF
-# ================================
-st.markdown("## 💼 Distribuzione ETF")
-fig_pie, ax_pie = plt.subplots(figsize=(4, 4))
-colors = plt.cm.viridis(np.linspace(0, 1, len(alloc_norm)))
-ax_pie.pie(alloc_norm.values(),
-           labels=[f"{n} ({p*100:.1f}%)" for n, p in alloc_norm.items()],
-           colors=colors, autopct="%1.1f%%", startangle=90, textprops={'color': "w"})
-ax_pie.set_title("Distribuzione attuale", color="w")
-fig_pie.patch.set_facecolor("#0E1117")
-ax_pie.set_facecolor("#0E1117")
-pie_buf = BytesIO()
-fig_pie.savefig(pie_buf, format='png', bbox_inches='tight', dpi=200)
-pie_buf.seek(0)
-plt.close('all')
+# -----------------------
+# Mostra FX path deterministico e primo MC sample if mc_runs>0
+# -----------------------
+st.subheader("Dettagli FX e distribuzioni (EUR/USD)")
 
-col1, col2 = st.columns([1, 2])
-col1.image(pie_buf, use_container_width=True)
-col2.write("### Dettagli ETF attivi:")
-for n, w in alloc_norm.items():
-    r = etf_data[n]["return"] * mult_rend * 100
-    v = etf_data[n]["vol"] * mult_vol * 100
-    col2.write(f"• **{n}** — rendimento medio: {r:.2f}%, volatilità: {v:.1f}%, peso: {w*100:.1f}%")
+st.write(f"FX iniziale impostato = {fx_initial:.3f}. Drift annuo impostato = {fx_drift:.3%}, vol = {fx_vol:.2%}")
 
-# ================================
-# PDF EXPORT
-# ================================
-def genera_pdf():
-    buffer_pdf = BytesIO()
-    doc = SimpleDocTemplate(buffer_pdf, pagesize=landscape(A4))
-    styles = getSampleStyleSheet()
-    story = []
+if mc_runs > 0:
+    st.write("Distribuzione dei valori finali (Monte Carlo)")
+    fig2, ax2 = plt.subplots(figsize=(8,4))
+    ax2.hist(mc_results, bins=40, color="#7a4cff", alpha=0.8)
+    ax2.axvline(np.percentile(mc_results,50), color='k', linestyle='--', label='mediana')
+    ax2.axvline(target_value, color='r', linestyle=':', label='target')
+    ax2.set_xlabel("Valore finale (€)")
+    ax2.set_ylabel("Frequenza")
+    ax2.legend()
+    st.pyplot(fig2)
+    plt.close(fig2)
 
-    story.append(Paragraph("<b>💹 Report Portafoglio ETF - Versione Moderna</b>", styles["Title"]))
-    story.append(Spacer(1, 12))
-    story.append(Paragraph(f"Scenario: {scenario}", styles["Normal"]))
-    story.append(Paragraph(f"Totale investito: {investito_finale:,.0f} €", styles["Normal"]))
-    story.append(Paragraph(f"Valore finale: {valore_finale:,.0f} €", styles["Normal"]))
-    story.append(Paragraph(f"Profitto: {profitto:,.0f} €", styles["Normal"]))
-    story.append(Paragraph(f"CAGR medio: {cagr:.2f}%", styles["Normal"]))
-    story.append(Spacer(1, 12))
-    story.append(Image(img_buf_main, width=450, height=250))
-    story.append(Spacer(1, 12))
-    story.append(Image(pie_buf, width=300, height=300))
+st.markdown("---")
+st.caption("Modello semplificato: gli annual returns sono campionati Normal(mu, sigma) per facilità educativa. Per analisi più sofisticate si possono usare processi log-normali e simulazioni con step mensili.")
 
-    for n, w in alloc_norm.items():
-        r = etf_data[n]["return"] * mult_rend * 100
-        v = etf_data[n]["vol"] * mult_vol * 100
-        story.append(Paragraph(f"{n}: rendimento {r:.2f}%, volatilità {v:.1f}%, allocazione {w*100:.1f}%", styles["Normal"]))
-
-    doc.build(story)
-    buffer_pdf.seek(0)
-    return buffer_pdf
-
-st.download_button(
-    label="📄 Scarica Report PDF",
-    data=genera_pdf(),
-    file_name=f"portafoglio_moderno_{scenario.lower()}.pdf",
-    mime="application/pdf"
-)
