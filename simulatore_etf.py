@@ -1,4 +1,3 @@
-# simulatore_etf_slim.py
 import streamlit as st
 import yfinance as yf
 import numpy as np
@@ -19,7 +18,6 @@ def fetch_prices(ticker: str, period: str = "max") -> pd.Series:
     h = t.history(period=period, auto_adjust=True)
     if h is None or h.empty:
         raise ValueError(f"No history for {ticker}")
-    # auto_adjust True => 'Close' is adjusted close
     s = h["Close"].dropna()
     s.index = pd.to_datetime(s.index)
     return s
@@ -48,12 +46,69 @@ def compute_cagr(start, end, years):
         return 0.0
     return (end / start) ** (1.0 / years) - 1.0
 
+
+# --------------------
+# Simulation functions (moved above)
+# --------------------
+def simulate_monthly(initial, monthly, years, weights, cagrs, ters, fineco_fee, fx_spread, tickers):
+    months = years * 12
+    nav = np.zeros(months)
+    invested = np.zeros(months)
+    nav_val = float(initial)
+    invested_cum = float(initial)
+    monthly_rates = (1 + cagrs) ** (1 / 12) - 1
+    monthly_ter = (1 - ters) ** (1 / 12) - 1
+    usd_flags = np.array([("USD" in t.upper()) or (".US" in t.upper()) or ("USD" in st.session_state.etfs[t]["name"].upper()) for t in tickers])
+
+    for m in range(months):
+        total_comm = 0.0
+        for j in range(len(tickers)):
+            tranche = monthly * weights[j]
+            total_comm += commission(tranche, bool(usd_flags[j]), fineco_fee, fx_spread)
+        net_buy = max(0.0, monthly - total_comm)
+        nav_val += net_buy
+        invested_cum += monthly
+        weighted_ret = float(np.dot(weights, monthly_rates))
+        weighted_ter = float(np.dot(weights, monthly_ter))
+        nav_val = nav_val * (1.0 + weighted_ret + weighted_ter)
+        nav[m] = nav_val
+        invested[m] = invested_cum
+
+    nav_year = np.array([nav[(y+1)*12 - 1] for y in range(years)])
+    invested_year = np.array([invested[(y+1)*12 - 1] for y in range(years)])
+    return nav_year, invested_year
+
+def simulate_annual(initial, monthly, years, weights, cagrs, ters, fineco_fee, fx_spread, tickers):
+    nav = np.zeros(years)
+    invested = np.zeros(years)
+    nav_val = float(initial)
+    invested_cum = float(initial)
+    usd_flags = np.array([("USD" in t.upper()) or (".US" in t.upper()) or ("USD" in st.session_state.etfs[t]["name"].upper()) for t in tickers])
+    annual_input = monthly * 12.0
+
+    for y in range(years):
+        total_comm = 0.0
+        for j in range(len(tickers)):
+            tranche = annual_input * weights[j]
+            total_comm += commission(tranche, bool(usd_flags[j]), fineco_fee, fx_spread)
+        net_buy = max(0.0, annual_input - total_comm)
+        nav_val += net_buy
+        invested_cum += annual_input
+        weighted_ret = float(np.dot(weights, cagrs))
+        weighted_ter = float(np.dot(weights, ters))
+        nav_val = nav_val * (1.0 + weighted_ret) * (1.0 - weighted_ter)
+        nav[y] = nav_val
+        invested[y] = invested_cum
+
+    return nav, invested
+
+
 # --------------------
 # UI sidebar: load ETF
 # --------------------
 st.sidebar.header("1) Carica ETF (ticker preferibile)")
 if "etfs" not in st.session_state:
-    st.session_state.etfs = {}  # ticker -> dict
+    st.session_state.etfs = {}
 
 ticker_in = st.sidebar.text_input("Ticker (es. VWCE.DE, IE00BK5BQT80 -> preferisci ticker)", value="VWCE.DE")
 if st.sidebar.button("Carica"):
@@ -105,7 +160,7 @@ target_active = st.sidebar.checkbox("Imposta target", value=True)
 target = st.sidebar.number_input("Target (€)", value=100000.0, step=1000.0)
 
 # --------------------
-# Portfolio allocations (sliders)
+# Portfolio allocations
 # --------------------
 st.header("Configura portafoglio")
 if len(st.session_state.etfs) == 0:
@@ -130,99 +185,14 @@ for t in tickers:
     ter_val = st.number_input(f"TER {t} (%)", value=st.session_state.etfs[t]["ter"]*100, key=f"ter_{t}") / 100.0
     st.session_state.etfs[t]["ter"] = ter_val
 
-# apply scenario multiplier
+# Scenario adjustment
 mult = {"Pessimistico": 0.7, "Neutro": 1.0, "Ottimistico": 1.25}[scenario]
 cagrs = np.array([st.session_state.etfs[t]["cagr"] for t in tickers]) * mult
 ters = np.array([st.session_state.etfs[t]["ter"] for t in tickers])
 
 # --------------------
-# Simulation (optimized)
+# Simulation execution
 # --------------------
-def simulate_monthly_fixed(initial, monthly, years, weights, cagrs, ters, fineco_fee, fx_spread, tickers):
-    months = int(years * 12)
-    nav = np.zeros(months)
-    invested = np.zeros(months)
-
-    nav_val = float(initial)
-    invested_cum = float(initial)
-
-    # monthly return per ETF (decimale)
-    monthly_rates = (1.0 + cagrs) ** (1.0 / 12.0) - 1.0
-    # monthly TER as equivalent multiplicative factor (es. 1 - ter_annuo)^(1/12)
-    monthly_ter_factor = (1.0 - ters) ** (1.0 / 12.0)
-
-    # USD flag
-    usd_flags = np.array([("USD" in t.upper()) or (".US" in t.upper()) or ("USD" in st.session_state.etfs[t]["name"].upper()) for t in tickers])
-
-    for m in range(months):
-        # ---- determine commissions aggregated for this monthly order (one order across ETFs)
-        total_comm = 0.0
-        # if you want to charge commission once per order, compute on total amount
-        total_tranche = monthly
-        # If you instead want commission per ETF, uncomment the per-ETF block below
-        # for j in range(len(tickers)):
-        #     tranche = monthly * weights[j]
-        #     total_comm += commission(tranche, bool(usd_flags[j]), fineco_fee, fx_spread)
-
-        # Commission on whole order (more realistic): charged once, consider USD spreads per ETF proportionally
-        # approximate FX cost for USD portion:
-        usd_share = float(np.dot(weights, usd_flags.astype(float)))
-        fx_cost = total_tranche * usd_share * fx_spread
-        # apply one brokerage fee per order if order < 2500
-        order_fee = fineco_fee if total_tranche < 2500.0 else 0.0
-        total_comm = order_fee + fx_cost
-
-        # Net amount actually invested this month
-        net_buy = max(0.0, total_tranche - total_comm)
-
-        # ---- apply returns to existing NAV first (assume contribution at end of period)
-        weighted_ret = float(np.dot(weights, monthly_rates))
-        nav_val = nav_val * (1.0 + weighted_ret)
-
-        # ---- apply TER as multiplicative reduction to all holdings
-        # convert weights into a single monthly TER factor: product_i ( (1-ter_i)^(1/12) )^weight_i approximate via exp(sum(weight_i*ln(factor_i)))
-        # simpler: weighted monthly factor (approx)
-        weighted_monthly_ter_factor = np.prod(monthly_ter_factor ** weights)
-        nav_val = nav_val * weighted_monthly_ter_factor
-
-        # ---- add the month's net contribution AFTER returns (end-of-period convention)
-        nav_val += net_buy
-
-        # ---- invested accounting: track what you actually paid (gross or net as desired)
-        invested_cum += total_tranche  # gross paid
-        # or if you want invested to be the actual money that entered the market (net of commission), do:
-        # invested_cum += net_buy
-
-        nav[m] = nav_val
-        invested[m] = invested_cum
-
-    # compress to yearly result (end of each year)
-    nav_year = np.array([nav[(y+1)*12 - 1] for y in range(years)])
-    invested_year = np.array([invested[(y+1)*12 - 1] for y in range(years)])
-    return nav_year, invested_year
-
-def simulate_annual(initial, monthly, years, weights, cagrs, ters, fineco_fee, fx_spread, tickers):
-    nav = np.zeros(years)
-    invested = np.zeros(years)
-    nav_val = float(initial)
-    invested_cum = float(initial)
-    usd_flags = np.array([("USD" in t.upper()) or (".US" in t.upper()) or ("USD" in st.session_state.etfs[t]["name"].upper()) for t in tickers])
-    annual_input = monthly * 12.0
-    for y in range(years):
-        total_comm = 0.0
-        for j in range(len(tickers)):
-            tranche = annual_input * weights[j]
-            total_comm += commission(tranche, bool(usd_flags[j]), fineco_fee, fx_spread)
-        net_buy = max(0.0, annual_input - total_comm)
-        nav_val += net_buy
-        invested_cum += annual_input
-        weighted_ret = float(np.dot(weights, cagrs))
-        weighted_ter = float(np.dot(weights, ters))
-        nav_val = nav_val * (1.0 + weighted_ret) * (1.0 - weighted_ter)
-        nav[y] = nav_val
-        invested[y] = invested_cum
-    return nav, invested
-
 if mode.startswith("Monthly"):
     nav_y, inv_y = simulate_monthly(initial, monthly, horizon, weights, cagrs, ters, fineco_fee, fx_spread, tickers)
 else:
@@ -258,7 +228,6 @@ df["Profitto (€)"] = df["Valore nominale (€)"] - df["Investito (€)"]
 df["Netto dopo tasse (€)"] = df["Valore nominale (€)"] - (np.maximum(0, df["Profitto (€)"]) * tax)
 df["Valore reale (€)"] = df["Valore nominale (€)"] / ((1 + infl) ** df["Anno"].values)
 
-# Plotly chart
 fig = go.Figure()
 fig.add_trace(go.Scatter(x=df["Anno"], y=df["Investito (€)"], name="Investito", line=dict(color="#00C9A7", dash="dash")))
 fig.add_trace(go.Scatter(x=df["Anno"], y=df["Valore nominale (€)"], name="Valore lordo", line=dict(color="#FF7F50", width=3)))
@@ -271,7 +240,6 @@ st.plotly_chart(fig, use_container_width=True)
 st.subheader("Tabella anno-per-anno")
 st.dataframe(df.style.format("{:,.0f}"))
 
-# CSV export / compare
 c_left, c_right = st.columns(2)
 with c_left:
     csv = df.to_csv(index=False).encode("utf-8")
@@ -290,4 +258,4 @@ with c_right:
         else:
             st.error("CSV non compatibile. Serve 'Anno' e colonna valore.")
 
-st.caption("Versione slim: meno code-print in chat e caching per yfinance. Se vuoi, posso creare una 'light mode' che evita fetch yfinance (usa valori predefiniti) per massima velocità.")
+st.caption("Versione corretta: simulate_monthly e simulate_annual spostate sopra la chiamata per evitare NameError.")
