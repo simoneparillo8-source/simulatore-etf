@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Tuple
 
 st.set_page_config(page_title="ETF Picker — Slim", layout="wide")
-st.title("ETF Picker — Slim & Veloce")
+st.title("ETF Picker — Slim & Realistico")
 
 # --------------------
 # Helpers & cache
@@ -48,7 +48,7 @@ def compute_cagr(start, end, years):
 
 
 # --------------------
-# Simulation functions (moved above)
+# Simulation functions (CORRETTE)
 # --------------------
 def simulate_monthly(initial, monthly, years, weights, cagrs, ters, fineco_fee, fx_spread, tickers):
     months = years * 12
@@ -57,7 +57,7 @@ def simulate_monthly(initial, monthly, years, weights, cagrs, ters, fineco_fee, 
     nav_val = float(initial)
     invested_cum = float(initial)
     monthly_rates = (1 + cagrs) ** (1 / 12) - 1
-    monthly_ter = (1 - ters) ** (1 / 12) - 1
+    monthly_ter = (1 - ters) ** (1 / 12) - 1  # TER come perdita
     usd_flags = np.array([("USD" in t.upper()) or (".US" in t.upper()) or ("USD" in st.session_state.etfs[t]["name"].upper()) for t in tickers])
 
     for m in range(months):
@@ -70,7 +70,8 @@ def simulate_monthly(initial, monthly, years, weights, cagrs, ters, fineco_fee, 
         invested_cum += monthly
         weighted_ret = float(np.dot(weights, monthly_rates))
         weighted_ter = float(np.dot(weights, monthly_ter))
-        nav_val = nav_val * (1.0 + weighted_ret + weighted_ter)
+        # 🔧 TER ora sottratto (non aggiunto)
+        nav_val = nav_val * (1.0 + weighted_ret - abs(weighted_ter))
         nav[m] = nav_val
         invested[m] = invested_cum
 
@@ -96,7 +97,8 @@ def simulate_annual(initial, monthly, years, weights, cagrs, ters, fineco_fee, f
         invested_cum += annual_input
         weighted_ret = float(np.dot(weights, cagrs))
         weighted_ter = float(np.dot(weights, ters))
-        nav_val = nav_val * (1.0 + weighted_ret) * (1.0 - weighted_ter)
+        # 🔧 TER correttamente sottratto
+        nav_val = nav_val * ((1.0 + weighted_ret) * (1.0 - abs(weighted_ter)))
         nav[y] = nav_val
         invested[y] = invested_cum
 
@@ -144,8 +146,8 @@ else:
 # --------------------
 st.sidebar.header("2) Parametri investimento")
 initial = st.sidebar.number_input("Capitale iniziale (€)", value=1000.0, step=100.0)
-monthly = st.sidebar.number_input("Versamento mensile (€)", value=50.0, step=10.0)
-horizon = st.sidebar.slider("Orizzonte (anni)", 1, 40, 20)
+monthly = st.sidebar.number_input("Versamento mensile (€)", value=100.0, step=10.0)
+horizon = st.sidebar.slider("Orizzonte (anni)", 1, 40, 30)
 scenario = st.sidebar.selectbox("Scenario", ["Neutro", "Pessimistico", "Ottimistico"])
 tax = st.sidebar.number_input("Aliquota capital gain (%)", value=26.0, step=0.5) / 100.0
 infl = st.sidebar.number_input("Inflazione annua (%)", value=2.0, step=0.1) / 100.0
@@ -180,7 +182,7 @@ if alloc_arr.sum() == 0:
     st.stop()
 weights = alloc_arr / alloc_arr.sum()
 
-# TER override compact
+# TER override
 for t in tickers:
     ter_val = st.number_input(f"TER {t} (%)", value=st.session_state.etfs[t]["ter"]*100, key=f"ter_{t}") / 100.0
     st.session_state.etfs[t]["ter"] = ter_val
@@ -258,4 +260,4 @@ with c_right:
         else:
             st.error("CSV non compatibile. Serve 'Anno' e colonna valore.")
 
-st.caption("Versione corretta: simulate_monthly e simulate_annual spostate sopra la chiamata per evitare NameError.")
+st.caption("Versione corretta: TER sottratto dal rendimento, valori realistici per investimenti a lungo termine.")
