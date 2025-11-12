@@ -111,7 +111,7 @@ else:
         st.sidebar.write(f"   CAGR {d['cagr']:.2%} • Vol {d['vol']:.2%} • TER {d['ter']*100:.2f}%")
         if st.sidebar.button(f"Rimuovi {t}", key=f"rm_{t}"):
             st.session_state.loaded_etfs.pop(t)
-            st.experimental_rerun()
+            st.rerun()
 
 # ---------------------------
 # Sidebar: investment params & Fineco costs
