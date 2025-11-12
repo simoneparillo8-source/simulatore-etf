@@ -4,3 +4,4 @@ numpy
 pandas
 reportlab
 yfinance
+plotly
