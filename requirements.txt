@@ -1,7 +1,2 @@
-streamlit
-matplotlib
-numpy
 pandas
-reportlab
-yfinance
 plotly
